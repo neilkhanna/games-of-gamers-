@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Simple 3D Driving Game (Three.js)</title>
+  <style>
+    html,body{height:100%;margin:0;overflow:hidden;background:#111}
+    #ui{position:absolute;left:12px;top:12px;color:#fff;font-family:sans-serif;z-index:10}
+    #instructions{background:rgba(0,0,0,0.5);padding:10px;border-radius:6px}
+    canvas{display:block}
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div id="instructions">
+      <b>Controls</b>: Arrow Left / Right to steer, Up to accelerate, Down to brake.<br>
+      <b>Goal</b>: Avoid obstacles and drive as far as possible.
+    </div>
+    <div id="score">Score: 0</div>
+  </div>
+
+  <script src="https://unpkg.com/three@0.158.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.158.0/examples/js/controls/OrbitControls.js"></script>
+
+  <script>
+  // Basic 3D driving game using Three.js
+  // Save this file as .html and open in a browser.
+
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x111111, 0.02);
+
+  const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 1000);
+  camera.position.set(0, 6, 12);
+
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.setPixelRatio(devicePixelRatio);
+  document.body.appendChild(renderer.domElement);
+
+  // Lights
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+  hemi.position.set(0, 20, 0);
+  scene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+  dir.position.set(5,10,7);
+  scene.add(dir);
+
+  // Road
+  const roadWidth = 6;
+  const roadLength = 2000;
+  const roadGeo = new THREE.PlaneGeometry(roadWidth, roadLength);
+  const roadMat = new THREE.MeshStandardMaterial({color:0x222222});
+  const road = new THREE.Mesh(roadGeo, roadMat);
+  road.rotation.x = -Math.PI/2;
+  road.position.z = -roadLength/2 + 10;
+  scene.add(road);
+
+  // Road markings (center line)
+  const lineGeo = new THREE.PlaneGeometry(0.2, roadLength);
+  const lineMat = new THREE.MeshBasicMaterial({color:0xffff88});
+  const line = new THREE.Mesh(lineGeo, lineMat);
+  line.rotation.x = -Math.PI/2;
+  line.position.z = -roadLength/2 + 10;
+  scene.add(line);
+
+  // Simple ground beside road
+  const groundGeo = new THREE.PlaneGeometry(50, roadLength);
+  const groundMat = new THREE.MeshStandardMaterial({color:0x0b3b0b});
+  const ground1 = new THREE.Mesh(groundGeo, groundMat);
+  ground1.rotation.x = -Math.PI/2;
+  ground1.position.x = -15;
+  ground1.position.z = -roadLength/2 + 10;
+  scene.add(ground1);
+  const ground2 = ground1.clone(); ground2.position.x = 15; scene.add(ground2);
+
+  // Player car (a simple box)
+  const car = new THREE.Group();
+  const bodyGeo = new THREE.BoxGeometry(1.6, 0.6, 3);
+  const bodyMat = new THREE.MeshStandardMaterial({color:0xff3333});
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.position.y = 0.5;
+  car.add(body);
+  // wheels
+  const wheelGeo = new THREE.BoxGeometry(0.4,0.4,0.6);
+  const wheelMat = new THREE.MeshStandardMaterial({color:0x111111});
+  const wheelPositions = [[-0.7,0.1,1], [0.7,0.1,1], [-0.7,0.1,-1], [0.7,0.1,-1]];
+  wheelPositions.forEach(p=>{const w=new THREE.Mesh(wheelGeo,wheelMat); w.position.set(...p); car.add(w);});
+  car.position.set(0,0,5);
+  scene.add(car);
+
+  // Camera follow target
+  const cameraTarget = new THREE.Object3D();
+  cameraTarget.position.copy(car.position);
+  scene.add(cameraTarget);
+
+  // Obstacles array
+  const obstacles = [];
+  const obstacleGeo = new THREE.BoxGeometry(1.2,1.2,1.2);
+  const obstacleMat = new THREE.MeshStandardMaterial({color:0x8888ff});
+
+  // Controls state
+  const keys = {left:false,right:false,up:false,down:false};
+  addEventListener('keydown',(e)=>{if(e.key.includes('Arrow')) e.preventDefault(); if(e.key==='ArrowLeft') keys.left=true; if(e.key==='ArrowRight') keys.right=true; if(e.key==='ArrowUp') keys.up=true; if(e.key==='ArrowDown') keys.down=true;});
+  addEventListener('keyup',(e)=>{if(e.key==='ArrowLeft') keys.left=false; if(e.key==='ArrowRight') keys.right=false; if(e.key==='ArrowUp') keys.up=false; if(e.key==='ArrowDown') keys.down=false;});
+
+  // Game variables
+  let speed = 0; // forward speed
+  const maxSpeed = 0.6;
+  const accel = 0.01;
+  const decel = 0.02;
+  let distance = 0;
+  let spawnTimer = 0;
+  let alive = true;
+
+  // Helpers
+  function spawnObstacle(z){
+    const obs = new THREE.Mesh(obstacleGeo, obstacleMat.clone());
+    const laneX = (Math.random()*2 -1) * (roadWidth/2 - 1.2);
+    obs.position.set(laneX, 0.6, z);
+    scene.add(obs);
+    obstacles.push(obs);
+  }
+
+  function resetGame(){
+    // remove obstacles
+    obstacles.forEach(o=>scene.remove(o)); obstacles.length=0;
+    car.position.set(0,0,5); speed=0; distance=0; spawnTimer=0; alive=true;
+    document.getElementById('score').innerText = 'Score: 0';
+  }
+
+  // Simple bounding box collision detection
+  function checkCollision(a,b){
+    const boxA = new THREE.Box3().setFromObject(a);
+    const boxB = new THREE.Box3().setFromObject(b);
+    return boxA.intersectsBox(boxB);
+  }
+
+  // Responsive
+  addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+  // Main loop
+  const clock = new THREE.Clock();
+  function animate(){
+    const dt = clock.getDelta();
+    if(!alive){ renderer.render(scene,camera); requestAnimationFrame(animate); return; }
+
+    // Controls: accelerate / brake
+    if(keys.up) speed += accel; else speed -= decel*0.5;
+    if(keys.down) speed -= decel*1.2;
+    speed = Math.max(0, Math.min(maxSpeed, speed));
+
+    // Steering
+    if(keys.left) car.position.x -= 0.12 + speed*0.2;
+    if(keys.right) car.position.x += 0.12 + speed*0.2;
+    // clamp to road
+    const halfRoad = roadWidth/2 - 0.9;
+    car.position.x = Math.max(-halfRoad, Math.min(halfRoad, car.position.x));
+
+    // Move forward (we simulate world moving backwards)
+    const moveZ = speed * 50 * dt;
+    distance += moveZ;
+    document.getElementById('score').innerText = 'Score: ' + Math.floor(distance);
+
+    // Move obstacles towards player
+    for(let i=obstacles.length-1;i>=0;i--){
+      const o = obstacles[i];
+      o.position.z += moveZ; // since camera looks towards -z, move obstacles forward
+      if(o.position.z > 12){ // past player
+        scene.remove(o); obstacles.splice(i,1);
+      } else {
+        // collision
+        if(checkCollision(car,o)){
+          alive = false;
+          body.material.color.set(0x550000);
+          setTimeout(()=>{ if(confirm('You crashed! Restart?')) resetGame(); }, 100);
+        }
+      }
+    }
+
+    // spawn obstacles ahead
+    spawnTimer -= moveZ;
+    if(spawnTimer <= 0){ spawnTimer = 4 + Math.random()*4; spawnObstacle(-200 + Math.random()*-60); }
+
+    // camera follow
+    cameraTarget.position.x = THREE.MathUtils.lerp(cameraTarget.position.x, car.position.x, 0.12);
+    camera.position.x = cameraTarget.position.x;
+    camera.position.z = car.position.z + 12;
+    camera.position.y = 6;
+    camera.lookAt(car.position.x, car.position.y+0.8, car.position.z - 4);
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+  }
+
+  // initial obstacle field
+  for(let i=0;i<8;i++) spawnObstacle(-30 - i*25);
+
+  animate();
+
+  </script>
+</body>
+</html>
